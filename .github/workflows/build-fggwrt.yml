@@ -40,6 +40,11 @@ jobs:
           cp -a /tmp/nas-packages/network/services/ddnsto package/ddnsto
           cp -a /tmp/nas-luci/luci/luci-app-ddnsto package/luci-app-ddnsto
           ./scripts/feeds update -a
+          # Current Xray requires Go 1.27; the stable feed defaults to 1.26.
+          test -f feeds/packages/lang/golang/golang1.27/Makefile
+          grep -q '^GO_DEFAULT_VERSION:=1.26$' feeds/packages/lang/golang/golang-values.mk
+          sed -i 's/^GO_DEFAULT_VERSION:=1.26$/GO_DEFAULT_VERSION:=1.27/' feeds/packages/lang/golang/golang-values.mk
+          grep -qx 'GO_DEFAULT_VERSION:=1.27' feeds/packages/lang/golang/golang-values.mk
           ./scripts/feeds install -a
           # Prefer the pinned PassWall dependency recipes over duplicate feed recipes.
           for recipe in package/passwall-packages/*/Makefile; do
