@@ -1,0 +1,183 @@
+name: Build FGGWrt
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/build-fggwrt.yml']
+permissions:
+  contents: read
+concurrency:
+  group: fggwrt-build
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev python3 python3-setuptools rsync swig unzip zlib1g-dev file wget curl libelf-dev libzstd-dev
+          df -h
+      - name: Fetch pinned sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init openwrt
+          cd openwrt
+          git remote add origin https://github.com/openwrt/openwrt.git
+          git fetch --depth 1 origin 64900e756efa667774214f9c6b17c113222e01f7
+          git checkout --detach FETCH_HEAD
+          clone_pin() {
+            git init "$3"
+            git -C "$3" remote add origin "https://github.com/$1.git"
+            git -C "$3" fetch --depth 1 origin "$2"
+            git -C "$3" checkout --detach FETCH_HEAD
+          }
+          clone_pin Openwrt-Passwall/openwrt-passwall 5f03390adf4561c2375def4b5406645ecf3f96a9 package/passwall
+          clone_pin Openwrt-Passwall/openwrt-passwall-packages b094b79c32ac4e4de3113a5c44971c6182eee535 package/passwall-packages
+          clone_pin linkease/nas-packages 757438fa3214b874d0ac80d8c60e5ad3ac316403 /tmp/nas-packages
+          clone_pin linkease/nas-packages-luci 1e6d14b824fb8721fcb86dd3c7f4a39bfdf2a014 /tmp/nas-luci
+          cp -a /tmp/nas-packages/network/services/ddnsto package/ddnsto
+          cp -a /tmp/nas-luci/luci/luci-app-ddnsto package/luci-app-ddnsto
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          # Prefer the pinned PassWall dependency recipes over duplicate feed recipes.
+          for recipe in package/passwall-packages/*/Makefile; do
+            [ -f "$recipe" ] || continue
+            name=$(basename "$(dirname "$recipe")")
+            find package/feeds -mindepth 2 -maxdepth 2 -type l -name "$name" -delete
+          done
+      - name: Configure stable universal x86 image
+        working-directory: openwrt
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > .config <<'CONFIG'
+          CONFIG_TARGET_x86=y
+          CONFIG_TARGET_x86_64=y
+          CONFIG_TARGET_x86_64_DEVICE_generic=y
+          CONFIG_TARGET_ROOTFS_SQUASHFS=y
+          CONFIG_GRUB_EFI_IMAGES=y
+          CONFIG_TARGET_IMAGES_GZIP=y
+          CONFIG_TARGET_KERNEL_PARTSIZE=64
+          CONFIG_TARGET_ROOTFS_PARTSIZE=1024
+          CONFIG_VERSIONOPT=y
+          CONFIG_VERSION_DIST="FGGWrt"
+          CONFIG_VERSION_NICK="OP-2026-FGG"
+          CONFIG_PACKAGE_luci-ssl=y
+          CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
+          CONFIG_PACKAGE_luci-theme-bootstrap=y
+          CONFIG_PACKAGE_luci-app-ttyd=y
+          CONFIG_PACKAGE_luci-i18n-ttyd-zh-cn=y
+          CONFIG_PACKAGE_luci-app-nlbwmon=y
+          CONFIG_PACKAGE_luci-i18n-nlbwmon-zh-cn=y
+          CONFIG_PACKAGE_luci-app-passwall=y
+          CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y
+          CONFIG_PACKAGE_luci-app-ddnsto=y
+          CONFIG_PACKAGE_ddnsto=y
+          CONFIG_PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy=y
+          # CONFIG_PACKAGE_luci-app-passwall_Iptables_Transparent_Proxy is not set
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust_Client=y
+          # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox is not set
+          # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Haproxy is not set
+          # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SmartDNS is not set
+          # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ShadowsocksR_Libev_Client is not set
+          # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Simple_Obfs is not set
+          # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_V2ray_Plugin is not set
+          CONFIG_PACKAGE_kmod-e1000=y
+          CONFIG_PACKAGE_kmod-e1000e=y
+          CONFIG_PACKAGE_kmod-igb=y
+          CONFIG_PACKAGE_kmod-igc=y
+          CONFIG_PACKAGE_kmod-ixgbe=y
+          CONFIG_PACKAGE_kmod-r8169=y
+          CONFIG_PACKAGE_kmod-tg3=y
+          CONFIG_PACKAGE_kmod-usb-net-rtl8152=y
+          CONFIG_PACKAGE_kmod-usb-net-asix-ax88179=y
+          CONFIG_PACKAGE_kmod-usb-storage-uas=y
+          CONFIG_PACKAGE_kmod-nvme=y
+          CONFIG_PACKAGE_kmod-fs-ext4=y
+          CONFIG_PACKAGE_kmod-fs-exfat=y
+          CONFIG_PACKAGE_block-mount=y
+          CONFIG_PACKAGE_intel-microcode=y
+          CONFIG_PACKAGE_amd64-microcode=y
+          CONFIG_PACKAGE_ethtool=y
+          CONFIG_PACKAGE_htop=y
+          CONFIG_PACKAGE_iperf3=y
+          CONFIG_PACKAGE_smartmontools=y
+          CONFIG_PACKAGE_curl=y
+          CONFIG
+          mkdir -p files/etc/uci-defaults
+          cat > files/etc/uci-defaults/99-fggwrt <<'DEFAULTS'
+          #!/bin/sh
+          uci set system.@system[0].hostname='FGGWrt'
+          uci set system.@system[0].timezone='CST-8'
+          uci set system.@system[0].zonename='Asia/Shanghai'
+          uci set network.lan.ipaddr='192.168.8.1'
+          uci set firewall.@defaults[0].flow_offloading='0'
+          uci set firewall.@defaults[0].flow_offloading_hw='0'
+          uci set passwall.@global[0].enabled='0'
+          uci commit system
+          uci commit network
+          uci commit firewall
+          uci commit passwall
+          /etc/init.d/ddnsto disable
+          # Restrict the optional web terminal to the LAN bridge.
+          uci -q set ttyd.@ttyd[0].interface='br-lan'
+          uci -q commit ttyd
+          exit 0
+          DEFAULTS
+          chmod +x files/etc/uci-defaults/99-fggwrt
+          make defconfig
+          for package in luci-app-passwall luci-app-ddnsto kmod-igc kmod-r8169; do
+            grep -qx "CONFIG_PACKAGE_${package}=y" .config || { echo "Required package missing: $package"; exit 1; }
+          done
+          if grep -q '^CONFIG_PACKAGE_luci-app-netwizard=y' .config; then exit 1; fi
+          mkdir -p ../reports
+          cp .config ../reports/build.config
+          ./scripts/diffconfig.sh > ../reports/diffconfig
+          git rev-parse HEAD > ../reports/openwrt-commit.txt
+          ./scripts/feeds list -s > ../reports/feeds.txt
+      - name: Download sources
+        working-directory: openwrt
+        run: make download -j4
+      - name: Build image
+        working-directory: openwrt
+        shell: bash
+        run: |
+          set -o pipefail
+          make -j2 V=s 2>&1 | tee ../reports/build.log
+      - name: Verify and package artifacts
+        working-directory: openwrt
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ../firmware
+          manifest=$(find bin/targets/x86/64 -maxdepth 1 -name '*.manifest' | head -1)
+          test -n "$manifest"
+          grep -q '^luci-app-passwall ' "$manifest"
+          grep -q '^luci-app-ddnsto ' "$manifest"
+          if grep -Eq '^luci-app-(netwizard|openclash|passwall2|ssr-plus|smartdns|mosdns|adguardhome|samba4|upnp|ddns|ddns-go) ' "$manifest"; then
+            echo 'Unexpected service installed'; exit 1
+          fi
+          cp "$manifest" ../firmware/packages.manifest
+          kernel=$(awk '$1 == "kernel" {print $3}' "$manifest")
+          image=$(find bin/targets/x86/64 -maxdepth 1 -name '*squashfs-combined-efi.img.gz' | head -1)
+          test -s "$image"
+          gzip -t "$image"
+          gzip -dc "$image" > "../firmware/FGGWrt-OP-2026-FGG-${kernel}-x86_64-combined-efi.img"
+          (cd ../firmware && sha256sum *.img > SHA256SUMS)
+          printf '%s\n' 'BUILD ONLY: physical boot, PPPoE and extended load tests are still required.' > ../firmware/VALIDATION.txt
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: FGGWrt-OP-2026-FGG-x86_64-efi
+          path: firmware/
+          retention-days: 14
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: FGGWrt-build-diagnostics
+          path: reports/
+          retention-days: 14
